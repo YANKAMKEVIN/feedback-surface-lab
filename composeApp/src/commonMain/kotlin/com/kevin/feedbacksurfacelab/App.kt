@@ -37,13 +37,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 @Composable
 fun App() {
@@ -141,8 +148,33 @@ private val feedbackPatterns = listOf(
 @Composable
 private fun FeedbackSurfaceLab() {
     var selectedIndex by remember { mutableStateOf(1) }
-    var activeKind by remember { mutableStateOf(FeedbackKind.Snackbar) }
+    // Persistent surfaces (inline error, banner, blocking dialog) currently on screen; null = none.
+    // Transient ones (snackbar, undo) go through the SnackbarHostState so they time out on their own.
+    var activeKind by remember { mutableStateOf<FeedbackKind?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     val selected = feedbackPatterns[selectedIndex]
+
+    fun trigger(kind: FeedbackKind) {
+        when (kind) {
+            FeedbackKind.Snackbar -> scope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                snackbarHostState.showSnackbar("Settings saved", duration = SnackbarDuration.Short)
+            }
+            FeedbackKind.Undo -> scope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                val result = snackbarHostState.showSnackbar(
+                    message = "Draft deleted",
+                    actionLabel = "UNDO",
+                    duration = SnackbarDuration.Long
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    snackbarHostState.showSnackbar("Draft restored", duration = SnackbarDuration.Short)
+                }
+            }
+            else -> activeKind = if (activeKind == kind) null else kind
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
@@ -160,7 +192,8 @@ private fun FeedbackSurfaceLab() {
                     selectedIndex = selectedIndex,
                     onSelected = {
                         selectedIndex = it
-                        activeKind = feedbackPatterns[it].kind
+                        activeKind = null
+                        snackbarHostState.currentSnackbarData?.dismiss()
                     }
                 )
             }
@@ -173,7 +206,8 @@ private fun FeedbackSurfaceLab() {
                     FeedbackPreview(
                         pattern = pattern,
                         activeKind = activeKind,
-                        onTrigger = { activeKind = pattern.kind }
+                        onTrigger = { trigger(pattern.kind) },
+                        onDismissBlocking = { activeKind = null }
                     )
                 }
             }
@@ -181,26 +215,25 @@ private fun FeedbackSurfaceLab() {
             item { Spacer(Modifier.height(74.dp)) }
         }
 
-        AnimatedVisibility(
-            visible = activeKind == FeedbackKind.Snackbar || activeKind == FeedbackKind.Undo,
+        SnackbarHost(
+            hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .padding(16.dp)
-        ) {
+        ) { data ->
             Snackbar(
                 containerColor = Ink,
                 contentColor = Color.White,
                 action = {
-                    if (activeKind == FeedbackKind.Undo) {
-                        Text("UNDO", color = Color(0xFFFFD166), fontWeight = FontWeight.Black)
+                    data.visuals.actionLabel?.let { label ->
+                        TextButton(onClick = { data.performAction() }) {
+                            Text(label, color = Color(0xFFFFD166), fontWeight = FontWeight.Black)
+                        }
                     }
                 }
             ) {
-                Text(
-                    text = if (activeKind == FeedbackKind.Undo) "Draft deleted" else "Settings saved",
-                    fontWeight = FontWeight.Bold
-                )
+                Text(text = data.visuals.message, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -254,8 +287,9 @@ private fun FeedbackTabs(selectedIndex: Int, onSelected: (Int) -> Unit) {
 @Composable
 private fun FeedbackPreview(
     pattern: FeedbackPattern,
-    activeKind: FeedbackKind,
-    onTrigger: () -> Unit
+    activeKind: FeedbackKind?,
+    onTrigger: () -> Unit,
+    onDismissBlocking: () -> Unit
 ) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -267,7 +301,7 @@ private fun FeedbackPreview(
             modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            MockProductSurface(pattern, activeKind)
+            MockProductSurface(pattern, activeKind, onDismissBlocking)
             Text(
                 text = pattern.trigger,
                 color = Ink,
@@ -292,14 +326,21 @@ private fun FeedbackPreview(
                 shape = RoundedCornerShape(15.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = pattern.accent)
             ) {
-                Text("Show ${pattern.title}", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (activeKind == pattern.kind) "Hide ${pattern.title}" else "Show ${pattern.title}",
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }
 }
 
 @Composable
-private fun MockProductSurface(pattern: FeedbackPattern, activeKind: FeedbackKind) {
+private fun MockProductSurface(
+    pattern: FeedbackPattern,
+    activeKind: FeedbackKind?,
+    onDismissBlocking: () -> Unit
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -379,6 +420,9 @@ private fun MockProductSurface(pattern: FeedbackPattern, activeKind: FeedbackKin
                         textAlign = TextAlign.Center,
                         lineHeight = 18.sp
                     )
+                    TextButton(onClick = onDismissBlocking) {
+                        Text("Reconnect", color = Slate, fontWeight = FontWeight.Black)
+                    }
                 }
             }
         }
